@@ -166,101 +166,133 @@ with tab1:
                 st.pyplot(plot_pyramid(age_map[y], f"{y}年 {final_town} 人口金字塔", y))
 
 with tab2:
-    st.header("📉 都市計畫區趨勢分析")
+      st.header("📉 都市計畫區趨勢與比較分析")
+        
+        # 1. 參數輸入
+        c3, c4 = st.columns(2)
+        with c3:
+            zip_village = st.file_uploader("📂 上傳【村里鄰數與戶籍統計】ZIP", type="zip", key="u2_village")
+            villages_input = st.text_input("📍 請輸入屬於『都計區』的村里", "萬和村, 萬全村, 萬能村")
+            target_villages = [v.strip() for v in villages_input.split(',')]
+        with c4:
+            year_range_str = st.text_input("📅 分析年份範圍 (EX: 100-114)", "100-114")
+        
+        # 初始化資料儲存
+        urban_data_map = {} # {年份: {'鄉人口': X, '都計區人口': Y}}
+        town_name_detected = "鄉鎮"
     
-    # 1. 參數輸入與檔案上傳
-    c3, c4 = st.columns(2)
-    with c3:
-        zip_village = st.file_uploader("📂 上傳【村里鄰數與戶籍統計】ZIP", type="zip", key="u3_village")
-        villages_input = st.text_input("📍 請輸入屬於『都計區』的村里 (逗號分隔)", "萬和村, 萬全村, 萬能村")
-        target_villages = [v.strip() for v in villages_input.split(',')]
-    with c4:
-        year_range_str = st.text_input("📅 分析年份範圍 (EX: 99-114)", "99-114")
+        # 2. 解析 ZIP 檔案
+        if zip_village:
+            with zipfile.ZipFile(zip_village, 'r') as z:
+                v_files = sorted([f for f in z.namelist() if f.endswith(('.xls', '.xlsx')) and not f.startswith('~')])
+                for f in v_files:
+                    try:
+                        v_df = pd.read_excel(z.open(f), header=None)
+                        # 抓年份與鄉鎮名
+                        h_txt = "".join(v_df.iloc[:5, 0].astype(str).fillna(''))
+                        y = re.search(r'(\d{2,3})', h_txt).group(1)
+                        town_name_detected = clean_town_name_final(h_txt) # 使用第一部分的清理函數
     
-    # 初始化儲存容器
-    village_trend = {}
+                        # 計算鄉總人口 (通常是尋找包含「合計」或「總計」的列，或全表村里加總)
+                        # 參考 pintung1.py：搜尋第一欄
+                        town_total = pd.to_numeric(v_df[v_df[0].astype(str).str.contains("計")].iloc[:, 1:10].stack(), errors='coerce').max()
+                        if pd.isna(town_total): # 若無總計列，則加總所有村里
+                            town_total = pd.to_numeric(v_df.iloc[:, 1:10].stack(), errors='coerce').sum() / 3 # 粗略估算，建議依格式微調
     
-    # 2. 解析 ZIP 內的村里 Excel
-    if zip_village:
-        with zipfile.ZipFile(zip_village, 'r') as z:
-            v_files = sorted([f for f in z.namelist() if f.endswith(('.xls', '.xlsx')) and not f.startswith('~')])
-            for f in v_files:
-                try:
-                    # 這裡是讀取村里資料的邏輯
-                    v_df_raw = pd.read_excel(z.open(f), header=None)
-                    # 提取標題年份
-                    h_text = "".join(v_df_raw.iloc[:3, 0].astype(str).fillna(''))
-                    y_match = re.search(r'(\d{2,3})', h_text)
-                    if y_match:
-                        y = y_match.group(1)
-                        # 搜尋村里名稱並加總人口 (參考妳的搜尋邏輯)
-                        mask = v_df_raw.apply(lambda row: any(v in str(row[0]) for v in target_villages), axis=1)
-                        # 抓取該列中數值最大的項作為人口總數
-                        pop_sum = pd.to_numeric(v_df_raw[mask].iloc[:, 1:10].stack(), errors='coerce').sum()
-                        village_trend[y] = int(pop_sum)
-                except: continue
+                        # 計算都計區人口
+                        mask = v_df.apply(lambda row: any(v in str(row[0]) for v in target_villages), axis=1)
+                        urban_pop = pd.to_numeric(v_df[mask].iloc[:, 1:10].stack(), errors='coerce').sum()
+                        
+                        urban_data_map[y] = {'鄉人口': int(town_total), '都計區人口': int(urban_pop)}
+                    except: continue
+    
+        # 3. 補全缺失年份
+        try:
+            if '-' in year_range_str:
+                start_y, end_y = map(int, year_range_str.split('-'))
+                full_years = [str(y) for y in range(start_y, end_y + 1)]
+                missing = [y for y in full_years if y not in urban_data_map]
+                
+                if missing:
+                    st.warning(f"⚠️ 尚缺少年份：{', '.join(missing)}")
+                    col_m1, col_m2 = st.columns(2)
+                    with col_m1:
+                        m_town = st.text_input(f"請依序輸入【{town_name_detected}】的人口數", placeholder="例：21635, 21200...", key="m_t")
+                    with col_m2:
+                        m_urban = st.text_input(f"請依序輸入【都計區】的人口數", placeholder="例：4344, 4200...", key="m_u")
+                    
+                    if m_town and m_urban:
+                        t_vals = [v.strip() for v in m_town.split(',')]
+                        u_vals = [v.strip() for v in m_urban.split(',')]
+                        if len(t_vals) == len(missing) and len(u_vals) == len(missing):
+                            for i, y in enumerate(missing):
+                                urban_data_map[y] = {'鄉人口': int(t_vals[i]), '都計區人口': int(u_vals[i])}
+                            st.success("✅ 資料補全成功")
+    
+                # 4. 核心計算與生成表格
+                if urban_data_map:
+                    rows = []
+                    for y in sorted(urban_data_map.keys(), key=int):
+                        if start_y <= int(y) <= end_y:
+                            rows.append({
+                                '年': y,
+                                '鄉人口': urban_data_map[y]['鄉人口'],
+                                '都計人口': urban_data_map[y]['都計區人口']
+                            })
+                    
+                    df_res = pd.DataFrame(rows)
+                    # 計算增減與增減率 (對齊表格格式)
+                    df_res['增加人口-鄉'] = df_res['鄉人口'].diff().fillna(0).astype(int)
+                    df_res['增加率-鄉'] = (df_res['增加人口-鄉'] / df_res['鄉人口'].shift(1) * 1000).fillna(0)
+                    
+                    df_res['增加人口-都計'] = df_res['都計人口'].diff().fillna(0).astype(int)
+                    df_res['增加率-都計'] = (df_res['增加人口-都計'] / df_res['都計人口'].shift(1) * 1000).fillna(0)
+                    
+                    # 計算平均列
+                    avg_row = {
+                        '年': '平均',
+                        '鄉人口': int(df_res['鄉人口'].mean()),
+                        '增加人口-鄉': int(df_res['增加人口-鄉'].iloc[1:].mean()),
+                        '增加率-鄉': df_res['增加率-鄉'].iloc[1:].mean(),
+                        '都計人口': int(df_res['都計人口'].mean()),
+                        '增加人口-都計': int(df_res['增加人口-都計'].iloc[1:].mean()),
+                        '增加率-都計': df_res['增加率-都計'].iloc[1:].mean()
+                    }
+                    
+                    # 重新整理欄位順序與名稱
+                    col_names = [
+                        '年', f'人口總數(人)-{town_name_detected}', f'增加人口(人)-{town_name_detected}', f'增加率-{town_name_detected}',
+                        '人口總數(人)-萬巒都市計畫區', '增加人口(人)-萬巒都市計畫區', '增加率-萬巒都市計畫區'
+                    ]
+                    
+                    df_display = df_res[['年', '鄉人口', '增加人口-鄉', '增加率-鄉', '都計人口', '增加人口-都計', '增加率-都計']]
+                    df_display.columns = col_names
+                    
+                    # 合併平均列
+                    final_df = pd.concat([df_display, pd.DataFrame([avg_row]).rename(columns={
+                        '鄉人口': col_names[1], '增加人口-鄉': col_names[2], '增加率-鄉': col_names[3],
+                        '都計人口': col_names[4], '增加人口-都計': col_names[5], '增加率-都計': col_names[6]
+                    })], ignore_index=True)
+                    
+                    st.subheader("📋 鄉鎮人口數彙總與比較分析表")
+                    st.table(final_df)
+    
+                    # 5. 繪製趨勢圖 (移除標籤)
+                    st.subheader("📉 都計區人口趨勢圖")
+                    fig_trend, ax_trend = plt.subplots(figsize=(12, 6))
+                    ax_trend.plot(df_res['年'], df_res['都計人口'], marker='o', color='#BF4B48', linewidth=2, label='都計區人口')
+                    ax_trend.set_title(f"{town_name_detected}都市計畫區 人口趨勢圖", fontsize=16)
+                    ax_trend.set_xlabel("年份 (民國)")
+                    ax_trend.set_ylabel("總人口數 (人)")
+                    ax_trend.grid(True, linestyle='--', alpha=0.6)
+                    # 不加上數值標籤 (Label)
+                    st.pyplot(fig_trend)
+                    
+                    # 下載按鈕
+                    csv = final_df.to_csv(index=False).encode('utf-8-sig')
+                    st.download_button("📥 下載比較分析表 (CSV)", data=csv, file_name="population_comparison.csv")
+    
+        except Exception as e:
+            st.error(f"執行發生錯誤：{e}")
 
-    # 3. 自動偵測缺失年份並「依序補全」
-    try:
-        if '-' in year_range_str:
-            start_y, end_y = map(int, year_range_str.split('-'))
-            full_years_list = [str(y) for y in range(start_y, end_y + 1)]
-            # 找出 ZIP 裡沒有的年份
-            missing_years = [y for y in full_years_list if y not in village_trend]
-            
-            if missing_years:
-                st.warning(f"⚠️ 檢測到數據缺失！")
-                st.info(f"💡 缺少年份：{', '.join(missing_years)}\n\n請依序輸入人口數，並以逗號分隔。")
-                
-                # 依序輸入人口數 (不需要輸入年份)
-                manual_pop_vals = st.text_input(f"請依序填入人口數 (需輸入 {len(missing_years)} 個數值)", 
-                                               placeholder="例如: 12000, 12500, 13000", 
-                                               key="v_pop_manual")
-                
-                if manual_pop_vals:
-                    vals = [v.strip() for v in manual_pop_vals.split(',')]
-                    if len(vals) == len(missing_years):
-                        for i, y in enumerate(missing_years):
-                            village_trend[y] = int(vals[i])
-                        st.success("✅ 手動人口數據補全成功！")
-                    else:
-                        st.error(f"❌ 數量不符！需要 {len(missing_years)} 個數值，您目前輸入了 {len(vals)} 個。")
-
-            # 4. 生成結果與繪製趨勢圖
-            if village_trend:
-                df_trend = pd.DataFrame(list(village_trend.items()), columns=['年份', '都計區人口'])
-                df_trend['年份_int'] = df_trend['年份'].astype(int)
-                df_trend = df_trend.sort_values('年份_int')
-                
-                # 計算人口增減
-                df_trend['人口增減'] = df_trend['都計區人口'].diff().fillna(0).astype(int)
-                
-                st.subheader("📋 鄉鎮人口數彙總與比較分析表")
-                # 依年份降序排列顯示
-                display_df = df_trend.sort_values('年份_int', ascending=False).drop(columns=['年份_int']).copy()
-                st.table(display_df.set_index('年份'))
-
-                # 繪製趨勢圖 (使用妳指定的顏色 #BF4B48)
-                st.subheader("📈 人口趨勢圖")
-                fig_trend, ax_trend = plt.subplots(figsize=(12, 6))
-                ax_trend.plot(df_trend['年份'], df_trend['都計區人口'], 
-                             marker='o', linestyle='-', color='#BF4B48', linewidth=2)
-                
-                # 加上數值標籤 (整數加千分位)
-                for i, txt in enumerate(df_trend['都計區人口']):
-                    ax_trend.annotate(f"{int(txt):,}", 
-                                     (df_trend['年份'].iloc[i], df_trend['都計區人口'].iloc[i]), 
-                                     textcoords="offset points", xytext=(0,10), ha='center', fontsize=10)
-                
-                ax_trend.set_title(f"都市計畫區 人口趨勢圖 ({year_range_str})", fontsize=16)
-                ax_trend.set_xlabel("年份 (民國)")
-                ax_trend.set_ylabel("總人口數 (人)")
-                ax_trend.grid(True, linestyle='--', alpha=0.6)
-                st.pyplot(fig_trend)
-                
-                # 下載按鈕
-                csv_data = df_trend.to_csv(index=False).encode('utf-8-sig')
-                st.download_button("📥 下載趨勢表 (CSV)", data=csv_data, file_name="urban_trend_report.csv")
-    except Exception as e:
-        st.error(f"分析範圍格式輸入錯誤，或數據處理異常。錯誤資訊: {e}")
 
