@@ -55,48 +55,86 @@ tab1, tab2 = st.tabs(["📊 第一部分：人口金字塔與指標表", "📉 �
 # ==========================================
 # 第一部分：人口金字塔與指標
 # ==========================================
+# --- 修正後的解析函數：精準抓取鄉鎮名 ---
+def extract_excel_info_refined(df_raw):
+    """精準提取年份與鄉鎮名，排除縣級名稱"""
+    # 讀取前 5 列所有文字
+    header_area = df_raw.iloc[:8, :3].astype(str).fillna('')
+    full_text = "".join(header_area.values.flatten()).replace(" ", "")
+    
+    # 1. 提取年份 (2-3位數字)
+    year_match = re.search(r'(\d{2,3})年', full_text)
+    year = year_match.group(1) if year_match else "未知"
+    
+    # 2. 提取鄉鎮 (精準匹配：前面不含「縣」或排除縣名)
+    # 優先找結尾是 鄉/鎮/市/區 的文字，並過濾掉縣名
+    town_matches = re.findall(r'[\u4e00-\u9fa5]{2,3}[鄉鎮市區]', full_text)
+    town = "未知鄉鎮"
+    if town_matches:
+        for t in town_matches:
+            if "縣" not in t and "政府" not in t and "省" not in t:
+                town = t
+                break
+        if town == "未知鄉鎮": # 若沒過濾出來，取最後一個通常是最小行政區
+            town = town_matches[-1].replace("屏東縣", "") 
+            
+    return year, town
+
+# --- 網頁介面 Part 1 ---
 with tab1:
     st.header("第一部分：現況分析")
     c1, c2 = st.columns(2)
     with c1:
-        zip_age = st.file_uploader("📂 1. 上傳【鄉鎮人口統計 ZIP】(內含 Excel)", type="zip", key="p1_zip")
+        zip_age = st.file_uploader("📂 1. 上傳【鄉鎮人口統計 ZIP】", type="zip", key="p1_zip")
     with c2:
         xlsx_county = st.file_uploader("📂 2. 上傳【縣市三階段 Excel】", type=["xlsx", "xls"], key="p1_xlsx")
 
     st.write("---")
-    col_p1, col_p2 = st.columns(2)
-    with col_p1:
-        target_county_name = st.text_input("📝 請輸入要讀取的縣市名稱 (例如：屏東縣)，完畢請按 Enter", "")
-        if target_county_name:
-            st.success(f"✅ 已確認比對縣市：{target_county_name}")
-
+    
+    # 這裡加入更強的互動感
+    target_county_name = st.text_input("📝 請輸入要讀取的縣市名稱 (例如：屏東縣)，完畢請按 Enter", "")
+    
+    if target_county_name:
+        st.success(f"✅ 已鎖定比對目標：**{target_county_name}**")
+    
     if zip_age:
-        age_data_store = {}
-        detected_town = "未知"
-        with zipfile.ZipFile(zip_age, 'r') as z:
-            excel_files = [f for f in z.namelist() if f.endswith(('.xls', '.xlsx')) and not f.startswith('~')]
-            for f in excel_files:
-                try:
-                    df_raw = pd.read_excel(z.open(f), header=None)
-                    y, t = extract_excel_info(df_raw)
-                    # 此處應放入你原本的單歲解析與 5 歲分組邏輯...
-                    # (假設已處理成單歲 df_final)
-                    # age_data_store[y] = df_final
-                    detected_town = t
-                except: continue
-        
-        with col_p2:
-            st.metric("偵測到目標鄉鎮", detected_town)
-            if age_data_store:
-                sel_y = st.selectbox("📅 選擇金字塔年份", sorted(age_data_store.keys(), reverse=True))
+        # 使用 st.status 讓你知道程式有在動
+        with st.status("🔍 正在解析 ZIP 檔案內容...", expanded=True) as status:
+            age_data_store = {}
+            final_town_name = "偵測中..."
+            
+            with zipfile.ZipFile(zip_age, 'r') as z:
+                excel_files = [f for f in z.namelist() if f.endswith(('.xls', '.xlsx')) and not f.startswith('~')]
+                
+                for f in excel_files:
+                    try:
+                        df_raw = pd.read_excel(z.open(f), header=None)
+                        y, t = extract_excel_info_refined(df_raw)
+                        # 這裡放你原本的解析數據邏輯 (df_processed)
+                        # age_data_store[y] = df_processed
+                        final_town_name = t
+                        st.write(f"已讀取 {y} 年數據...")
+                    except Exception as e:
+                        st.write(f"跳過檔案 {f}: {e}")
+            
+            status.update(label="✅ 檔案解析完成！", state="complete", expanded=False)
 
-        if st.button("🚀 開始執行第一部分分析"):
-            if not xlsx_county or not target_county_name:
-                st.warning("請確保 Excel 已上傳且縣市名稱已輸入。")
+        # 顯示偵測結果
+        st.write("---")
+        res_col1, res_col2 = st.columns(2)
+        with res_col1:
+            st.metric("🎯 偵測目標鄉鎮", final_town_name)
+        with res_col2:
+            if age_data_store:
+                sel_y = st.selectbox("📅 選擇要繪製金字塔的年份", sorted(age_data_store.keys(), reverse=True))
+
+        if st.button("🚀 執行分析 (生成金字塔與指標交錯表)"):
+            if not xlsx_county:
+                st.error("請提供縣市三階段 Excel 檔案。")
             else:
-                st.subheader(f"📊 {detected_town} 人口分析結果")
-                # 執行繪圖與交錯比較表邏輯...
                 st.balloons()
+                st.subheader(f"✨ {final_town_name} 分析報告")
+                # 繪圖與生成表格...
 
 # ==========================================
 # 第二部分：都計區趨勢與人口補充
@@ -161,3 +199,4 @@ with tab2:
             trend_df['增加人口'] = trend_df['都計區人口'].diff().fillna(0).astype(int)
             st.write("### 鄉鎮人口數彙總與比較分析表")
             st.dataframe(trend_df[['年份', '都計區人口', '增加人口']])
+
