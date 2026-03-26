@@ -8,7 +8,7 @@ import matplotlib.patches as mpatches
 import io, zipfile, re, os, requests
 from collections import OrderedDict
 
-# --- 1. 環境配置與字型 (部署 GitHub 必要) ---
+# --- 1. 環境配置與字型 ---
 st.set_page_config(page_title="屏東人口分析系統", layout="wide")
 
 @st.cache_resource
@@ -28,10 +28,10 @@ def load_font():
 
 FONT_NAME = load_font()
 
-# --- 2. 核心解析邏輯 (精確對齊用戶正確數據) ---
+# --- 2. 核心解析邏輯 (精確校準版) ---
 
 def clean_town_name(df_raw):
-    """提取純淨地名 (對齊 Colab 強力清理版)"""
+    """提取純淨地名 (排除 份/年/月 等雜質)"""
     header_text = "".join(df_raw.iloc[:5, 0].astype(str).fillna('')).replace(" ", "")
     year_match = re.search(r'(\d{2,3})', header_text)
     year = year_match.group(1) if year_match else "未知"
@@ -40,52 +40,58 @@ def clean_town_name(df_raw):
     town_matches = re.findall(r'[\u4e00-\u9fa5]{2,10}[鄉鎮市區]', header_text)
     if town_matches:
         raw_town = town_matches[-1]
-        clean = re.sub(r'^\d+|年|月|份|屏東縣', '', raw_town) # 排除縣名干擾
+        # 強力過濾地名中的干擾字
+        clean = re.sub(r'^\d+|年|月|份|屏東縣', '', raw_town)
         town = clean
     return year, town
 
 def process_age_excel(file_obj):
-    """解析 Excel 結構，確保 0-14, 15-64, 65+ 計算無誤"""
+    """解析鄉鎮 Excel，確保 0-14, 15-64, 65+ 計算完全正確"""
     df_raw = pd.read_excel(file_obj, header=None)
     year, town = clean_town_name(df_raw)
     
+    # 找尋包含「歲次」的標題列
     mask = df_raw.apply(lambda x: x.astype(str).str.replace(' ','').str.contains("歲次").any(), axis=1)
     if not any(mask): return None, year, town
     h_idx = df_raw[mask].index[0]
     
-    # 定位男/女行
+    # 鎖定男、女人口列
     sub = df_raw.loc[h_idx+1:]
     m_row = sub[sub[0].astype(str).str.contains("男")].iloc[0]
     f_row = sub[sub[0].astype(str).str.contains("女")].iloc[0]
-    
-    # 尋找數據列起點 (排除 總計/計)
     labels = df_raw.loc[h_idx].tolist()
-    s_col = 2
+    
+    # 尋找數據起點 (避開總計與計)
+    s_col = 1
     for i, v in enumerate(labels):
-        if str(v).strip().isdigit(): 
-            s_col = i; break
+        val_str = str(v).strip()
+        if val_str.isdigit() or "100" in val_str:
+            s_col = i
+            break
 
-    ages, m_pops, f_pops = [], [], []
+    ages, pops_m, pops_f = [], [], []
     for i in range(s_col, len(labels)):
-        age_val = str(labels[i]).strip()
-        if '100' in age_val: age_num = 100
-        else:
-            n = re.search(r'(\d+)', age_val)
-            age_num = int(n.group(1)) if n else None
+        label_str = str(labels[i]).strip()
+        if not label_str or "總計" in label_str or "計" in label_str: continue
         
+        # 轉換年齡標籤為數字
+        if '100' in label_str: age_num = 100
+        else:
+            match = re.search(r'(\d+)', label_str)
+            age_num = int(match.group(1)) if match else None
+            
         if age_num is not None:
             ages.append(age_num)
-            m_pops.append(int(pd.to_numeric(m_row[i], errors='coerce') or 0))
-            f_pops.append(int(pd.to_numeric(f_row[i], errors='coerce') or 0))
+            pops_m.append(int(pd.to_numeric(m_row[i], errors='coerce') or 0))
+            pops_f.append(int(pd.to_numeric(f_row[i], errors='coerce') or 0))
 
-    df = pd.DataFrame({'年齡': ages, '男': m_pops, '女': f_pops})
+    df = pd.DataFrame({'年齡': ages, '男': pops_m, '女': pops_f})
     df['總'] = df['男'] + df['女']
-    # 這裡重要：group 後再計算，確保 0-4, 5-9 等分散欄位能正確加總
-    df = df.groupby('年齡').sum().reset_index()
-    return df, year, town
+    # 關鍵：group 後再加總，解決 0-4, 5-9 分散導致的數據漏抓
+    return df.groupby('年齡').sum().reset_index(), year, town
 
-def calculate_metrics_refined(df, name, year):
-    """指標計算 (小數點兩位，完全對齊用戶示範)"""
+def calculate_metrics(df, name, year):
+    """計算指標 (精確到小數點兩位，完全對齊用戶要求)"""
     p0 = df[df['年齡'] < 15]['總'].sum()
     p15 = df[df['年齡'].between(15, 64)]['總'].sum()
     p65 = df[df['年齡'] >= 65]['總'].sum()
@@ -108,72 +114,70 @@ def calculate_metrics_refined(df, name, year):
 tab1, tab2 = st.tabs(["📊 第一部分：分析成果", "📈 第二部分：都計趨勢"])
 
 with tab1:
-    c1, c2 = st.columns(2)
-    with c1: zip_age = st.file_uploader("1. 上傳人口金字塔 ZIP", type="zip", key="u1_z")
-    with c2: county_csv = st.file_uploader("2. 上傳縣市三階段 CSV", type=["csv", "xlsx"], key="u1_c")
-    target_county = st.text_input("📝 比對行政區", "屏東縣")
+    col1, col2 = st.columns(2)
+    with col1: zip_pyramid = st.file_uploader("1. 上傳人口金字塔 ZIP (99-114)", type="zip", key="z1")
+    with col2: county_csvs = st.file_uploader("2. 上傳縣市三階段 CSV (可多選)", type="csv", accept_multiple_files=True, key="c1")
+    target_area = st.text_input("📝 比對行政區", "屏東縣")
 
-    if zip_age and county_csv:
+    if zip_pyramid and county_csvs:
         age_map, town_metrics, final_town = {}, [], ""
-        with zipfile.ZipFile(zip_age, 'r') as z:
-            # 排除系統暫存檔
-            valid_files = [f for f in z.namelist() if f.endswith(('.xls', '.xlsx')) and not f.startswith('~')]
-            for f in valid_files:
-                df_res, y, t = process_age_excel(z.open(f))
+        with zipfile.ZipFile(zip_pyramid, 'r') as z:
+            valid_files = sorted([f for f in z.namelist() if f.endswith(('.xls', '.xlsx')) and not f.startswith('~')])
+            for f_name in valid_files:
+                df_res, y, t = process_age_excel(z.open(f_name))
                 if df_res is not None:
                     age_map[y] = df_res
                     final_town = t
-                    town_metrics.append(calculate_metrics_refined(df_res, t + "鄉", y))
+                    town_metrics.append(calculate_metrics(df_res, t + "鄉", y))
         
+        # 儲存連動數據
         st.session_state['age_map'] = age_map
         st.session_state['town_name'] = final_town
 
-        # 解析縣市 CSV (針對您上傳的 99-114 CSV)
+        # 解析縣市 CSV
         county_metrics = []
-        if county_csv.name.endswith('.csv'):
-            df_c = pd.read_csv(county_csv)
-            # 清理名稱空格
+        for csv_file in county_csvs:
+            df_c = pd.read_csv(csv_file)
             df_c.iloc[:, 0] = df_c.iloc[:, 0].astype(str).str.replace(r'\s+', '', regex=True)
-            row = df_c[df_c.iloc[:, 0] == target_county]
+            row = df_c[df_c.iloc[:, 0] == target_area]
             if not row.empty:
-                # 根據您的 CSV 結構提取 (總計在 index 1, 0-14在 2, 15-64在 3, 65+在 4)
-                y_label = re.search(r'(\d+)', county_csv.name).group(1)
+                # 依據 CSV 結構 (總計2, 0-14歲3, 15-64歲4, 65+歲5 - 基於您的 snippet 校準)
+                year_key = re.search(r'(\d+)', csv_file.name).group(1)
                 p0, p15, p65 = row.iloc[0, 2], row.iloc[0, 3], row.iloc[0, 4]
-                # 虛擬 DF 用於計算指標
                 v_df = pd.DataFrame({'年齡':[7, 40, 70], '總':[p0, p15, p65]})
-                county_metrics.append(calculate_metrics_refined(v_df, target_county, y_label))
+                county_metrics.append(calculate_metrics(v_df, target_area, year_key))
 
-        # --- 交錯排列輸出 ---
+        # --- 最終交錯表格 ---
         inter_rows = []
         for y in sorted(age_map.keys(), key=int):
-            # 優先放縣市，再放鄉鎮 (對齊您的範例)
-            c_item = [m for m in county_metrics if m['年份'] == str(y)]
-            t_item = [m for m in town_metrics if m['年份'] == str(y)]
-            if c_item: inter_rows.append(c_item[0])
-            if t_item: inter_rows.append(t_item[0])
+            # 順序：縣市 -> 鄉鎮
+            c_data = [m for m in county_metrics if str(m['年份']) == str(y)]
+            t_data = [m for m in town_metrics if str(m['年份']) == str(y)]
+            if c_data: inter_rows.append(c_data[0])
+            if t_data: inter_rows.append(t_data[0])
         
         if inter_rows:
-            st.subheader("📋 人口指標交錯比較表")
+            st.subheader("📋 人口指標年度對照表 (縣市 vs 鄉鎮)")
             st.table(pd.DataFrame(inter_rows))
 
-        # --- 金字塔繪圖 (灰階斜紋) ---
+        # --- 金字塔 (灰階斜紋) ---
         st.divider()
         sel_yrs = st.multiselect("選擇年份繪製金字塔", options=sorted(age_map.keys(), key=int))
         for yr in sel_yrs:
             df = age_map[yr].copy()
-            # 分組 (0-4, 5-9...)
+            # 聚合為 5 歲一組
             bins = list(range(0, 101, 5))
-            labels = [f'{i}-{i+4}' for i in range(0, 95, 5)] + ['95-99']
-            df['段'] = pd.cut(df['年齡'], bins=bins, labels=labels, right=False).astype(str)
+            lbls = [f'{i}-{i+4}' for i in range(0, 95, 5)] + ['95-99']
+            df['段'] = pd.cut(df['年齡'], bins=bins, labels=lbls, right=False).astype(str)
             df.loc[df['年齡'] >= 100, '段'] = '100以上'
             
-            agg = df.groupby('段').agg({'男':'sum', '女':'sum'}).reindex(labels + ['100以上']).fillna(0)
+            agg = df.groupby('段').agg({'男':'sum', '女':'sum'}).reindex(lbls + ['100以上']).fillna(0)
             
             fig, ax = plt.subplots(figsize=(10, 8))
-            y_pos = np.arange(len(agg))
-            ax.barh(y_pos, -agg['男'], color="0.85", edgecolor="0.2", hatch="//", label=f"{yr} 男性")
-            ax.barh(y_pos, agg['女'], color="0.65", edgecolor="0.2", hatch="..", label=f"{yr} 女性")
-            ax.set_yticks(y_pos); ax.set_yticklabels(agg.index)
+            y_idx = np.arange(len(agg))
+            ax.barh(y_idx, -agg['男'], color="0.85", edgecolor="0.2", hatch="//", label=f"{yr} 男性")
+            ax.barh(y_idx, agg['女'], color="0.65", edgecolor="0.2", hatch="..", label=f"{yr} 女性")
+            ax.set_yticks(y_idx); ax.set_yticklabels(agg.index)
             ax.xaxis.set_major_formatter(FuncFormatter(lambda x, p: f"{abs(int(x)):,}"))
             ax.set_title(f"{yr}年 {final_town}鄉 人口金字塔", fontsize=16)
             ax.legend(loc="upper right")
