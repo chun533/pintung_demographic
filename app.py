@@ -8,12 +8,11 @@ import matplotlib.patches as mpatches
 import io, zipfile, re, os, requests
 from collections import OrderedDict
 
-# --- 1. 環境配置與中文字型 ---
+# --- 1. 環境配置 ---
 st.set_page_config(page_title="屏東人口分析系統", layout="wide")
 
 @st.cache_resource
 def load_font():
-    """下載並設定中文字型，確保在 GitHub 部署時不會亂碼"""
     font_url = "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/TraditionalChinese/NotoSansCJKtc-Regular.otf"
     font_path = "NotoSansCJKtc-Regular.otf"
     if not os.path.exists(font_path):
@@ -22,66 +21,66 @@ def load_font():
             with open(font_path, "wb") as f: f.write(r.content)
         except: return None
     fm.fontManager.addfont(font_path)
-    font_name = fm.FontProperties(fname=font_path).get_name()
-    plt.rcParams['font.family'] = font_name
-    plt.rcParams['axes.unicode_minus'] = False
-    return font_name
+    return fm.FontProperties(fname=font_path).get_name()
 
 FONT_NAME = load_font()
+if FONT_NAME:
+    plt.rcParams['font.family'] = FONT_NAME
+plt.rcParams['axes.unicode_minus'] = False
 
-# --- 2. 核心工具函式 ---
+# --- 2. 核心工具 ---
 
-def clean_town_name(text):
-    """強力清理地名 (對齊 Colab 區塊 B)"""
+def clean_town_name_v2(text):
     s = str(text).replace(" ", "").replace("\u3000", "")
-    # 移除數字開頭、年、月、份、以及屏東縣等字眼
-    clean = re.sub(r'^\d+|年|月|份|屏東縣', '', s)
-    # 匹配結尾為 鄉/鎮/市/區 的中文字串
+    clean = re.sub(r'^\d+|年|月|份|屏東縣|人口', '', s)
     match = re.search(r'[\u4e00-\u9fa5]{2,}[鄉鎮市區]', clean)
     return match.group(0) if match else clean
 
-def process_age_excel(file_obj):
-    """解析鄉鎮 ZIP 內的 Excel (精確加總單歲資料)"""
+def process_pyramid_excel(file_obj):
+    """精確解析鄉鎮 Excel：橫向遍歷所有年齡欄位"""
     df_raw = pd.read_excel(file_obj, header=None)
-    # 提取年份與地名
     header_area = "".join(df_raw.iloc[:5, 0].astype(str).fillna('')).replace(" ", "")
     year = re.search(r'(\d{2,3})', header_area).group(1) if re.search(r'(\d{2,3})', header_area) else "未知"
-    town = clean_town_name(header_area)
+    town = clean_town_name_v2(header_area)
     
-    # 尋找「歲次」列
+    # 定位標題列
     mask = df_raw.apply(lambda x: x.astype(str).str.replace(' ','').str.contains("歲次").any(), axis=1)
     if not any(mask): return None, year, town
     h_idx = df_raw[mask].index[0]
     
-    # 鎖定男女人口列
+    # 定位男女行
     sub = df_raw.loc[h_idx+1:]
-    m_idx = sub[sub[0].astype(str).str.contains("男")].index
-    f_idx = sub[sub[0].astype(str).str.contains("女")].index
-    if m_idx.empty or f_idx.empty: return None, year, town
+    m_idx = sub[sub[0].astype(str).str.contains("男")].index[0]
+    f_idx = sub[sub[0].astype(str).str.contains("女")].index[0]
     
     labels = df_raw.loc[h_idx].tolist()
-    # 尋找數據起點
-    s_col = 1
-    for i, v in enumerate(labels):
-        if str(v).strip().isdigit(): 
-            s_col = i; break
+    m_vals = df_raw.loc[m_idx].tolist()
+    f_vals = df_raw.loc[f_idx].tolist()
 
     ages, pops_m, pops_f = [], [], []
-    for i in range(s_col, len(labels)):
+    for i in range(1, len(labels)):
         lbl = str(labels[i]).strip()
-        if not lbl or "計" in lbl: continue
-        age_num = 100 if '100' in lbl else int(re.search(r'(\d+)', lbl).group(1)) if re.search(r'(\d+)', lbl) else None
-        if age_num is not None:
+        if lbl in ["None", "nan", "", "歲次", "總計", "計", "男", "女"]: continue
+        
+        # 提取年齡數字
+        age_match = re.search(r'(\d+)', lbl)
+        if age_match:
+            age_num = int(age_match.group(1))
+            if '100' in lbl: age_num = 100
+            
+            val_m = pd.to_numeric(m_vals[i], errors='coerce') or 0
+            val_f = pd.to_numeric(f_vals[i], errors='coerce') or 0
+            
             ages.append(age_num)
-            pops_m.append(pd.to_numeric(df_raw.loc[m_idx[0], i], errors='coerce') or 0)
-            pops_f.append(pd.to_numeric(df_raw.loc[f_idx[0], i], errors='coerce') or 0)
+            pops_m.append(int(val_m))
+            pops_f.append(int(val_f))
 
     df = pd.DataFrame({'年齡': ages, '男': pops_m, '女': pops_f})
     df['總'] = df['男'] + df['女']
+    # 這裡必須 Groupby，因為 0-4, 5-9 等欄位名稱可能重複或分散
     return df.groupby('年齡').sum().reset_index(), year, town
 
-def calculate_metrics(df, name, year):
-    """計算三階段人口指標 (精度 2 位)"""
+def calculate_metrics_v2(df, name, year):
     p0 = df[df['年齡'] < 15]['總'].sum()
     p15 = df[df['年齡'].between(15, 64)]['總'].sum()
     p65 = df[df['年齡'] >= 65]['總'].sum()
@@ -98,53 +97,57 @@ def calculate_metrics(df, name, year):
         '扶養比(%)': round((p0+p65)/p15*100, 2) if p15 > 0 else 0
     })
 
-# --- 3. 網頁 UI 主程式 ---
-st.title("🏗️ 屏東人口分析系統")
+# --- 3. UI 主程式 ---
+
 tab1, tab2 = st.tabs(["📊 第一部分：分析成果", "📈 第二部分：都計趨勢"])
 
 with tab1:
     c1, c2 = st.columns(2)
-    with c1: zip_u1 = st.file_uploader("1. 上傳人口金字塔 ZIP (99-114)", type="zip", key="u1_z")
-    with c2: xlsx_u1 = st.file_uploader("2. 上傳縣市三階段 Excel (.xlsx)", type="xlsx", key="u1_x")
+    with c1: zip_pyramid = st.file_uploader("1. 上傳人口金字塔 ZIP (99-114)", type="zip", key="u1_z")
+    with c2: xlsx_county = st.file_uploader("2. 上傳縣市三階段 Excel (.xlsx)", type="xlsx", key="u1_x")
     target_area = st.text_input("📝 比對行政區", "屏東縣")
 
-    if zip_u1 and xlsx_u1:
+    if zip_pyramid and xlsx_county:
         age_map, town_metrics, final_town = {}, [], ""
-        with zipfile.ZipFile(zip_u1, 'r') as z:
+        with zipfile.ZipFile(zip_pyramid, 'r') as z:
             files = sorted([f for f in z.namelist() if f.endswith(('.xls', '.xlsx')) and not f.startswith('~')])
             for f in files:
-                df_res, y, t = process_age_excel(z.open(f))
+                df_res, y, t = process_pyramid_excel(z.open(f))
                 if df_res is not None:
                     age_map[y] = df_res
                     final_town = t
-                    town_metrics.append(calculate_metrics(df_res, t, y))
+                    town_metrics.append(calculate_metrics_v2(df_res, t, y))
         
         st.session_state['age_map'] = age_map
         st.session_state['town_name'] = final_town
 
-        # 解析縣市 Excel (多 Sheet 遍歷)
+        # 解析縣市 Excel 數據 (多 Sheet)
         county_metrics = []
-        all_sheets = pd.read_excel(xlsx_u1, sheet_name=None, header=None)
+        all_sheets = pd.read_excel(xlsx_county, sheet_name=None, header=None)
         for sheet_name, df_s in all_sheets.items():
-            df_s[0] = df_s[0].astype(str).apply(lambda x: x.replace(" ",""))
+            # 清理第一欄地名
+            df_s[0] = df_s[0].astype(str).str.replace(" ", "").replace("\u3000", "")
             row = df_s[df_s[0].str.contains(target_area, na=False)]
             if not row.empty:
-                # 依據標準三階段 Excel: 總計(1), 0-14(2), 15-64(3), 65+(4)
-                p0, p15, p65 = pd.to_numeric(row.iloc[0, 2], errors='coerce'), pd.to_numeric(row.iloc[0, 3], errors='coerce'), pd.to_numeric(row.iloc[0, 4], errors='coerce')
+                # 依據格式：B總計(1), C(0-14)(2), D(15-64)(3), E(65+)(4)
+                p0 = pd.to_numeric(row.iloc[0, 2], errors='coerce') or 0
+                p15 = pd.to_numeric(row.iloc[0, 3], errors='coerce') or 0
+                p65 = pd.to_numeric(row.iloc[0, 4], errors='coerce') or 0
                 v_df = pd.DataFrame({'年齡':[7, 40, 70], '總':[p0, p15, p65]})
                 y_key = re.search(r'(\d+)', str(sheet_name)).group(1) if re.search(r'(\d+)', str(sheet_name)) else sheet_name
-                county_metrics.append(calculate_metrics(v_df, target_area, y_key))
+                county_metrics.append(calculate_metrics_v2(v_df, target_area, y_key))
 
-        # 交錯表格輸出
+        # 交錯表格
         interleaved = []
         for y in sorted(age_map.keys(), key=int):
             c_data = [m for m in county_metrics if str(m['年份']) == str(y)]
             t_data = [m for m in town_metrics if str(m['年份']) == str(y)]
             if c_data: interleaved.append(c_data[0])
             if t_data: interleaved.append(t_data[0])
-        
-        st.subheader(f"📋 {target_area} 與 {final_town} 人口指標對照表")
-        st.table(pd.DataFrame(interleaved))
+            
+        if interleaved:
+            st.subheader(f"📋 {target_area} 與 {final_town} 人口指標對照表")
+            st.table(pd.DataFrame(interleaved))
 
         # 金字塔圖 (灰階斜紋)
         st.divider()
@@ -157,14 +160,15 @@ with tab1:
             df.loc[df['年齡'] >= 100, '段'] = '100以上'
             agg = df.groupby('段', observed=False).agg({'男':'sum', '女':'sum'}).reindex(lbls + ['100以上']).fillna(0)
             
-            fig, ax = plt.subplots(figsize=(10, 7))
-            y_pos = np.arange(len(agg))
-            ax.barh(y_pos, -agg['男'], color="0.85", edgecolor="0.2", hatch="//", label="男性")
-            ax.barh(y_pos, agg['女'], color="0.65", edgecolor="0.2", hatch="..", label="女性")
-            ax.set_yticks(y_pos); ax.set_yticklabels(agg.index)
+            fig, ax = plt.subplots(figsize=(10, 8))
+            y_idx = np.arange(len(agg))
+            # 男左 (負值) 女右
+            ax.barh(y_idx, -agg['男'], color="0.85", edgecolor="0.2", hatch="//", label="男性")
+            ax.barh(y_idx, agg['女'], color="0.65", edgecolor="0.2", hatch="..", label="女性")
+            ax.set_yticks(y_idx); ax.set_yticklabels(agg.index)
             ax.xaxis.set_major_formatter(FuncFormatter(lambda x, p: f"{abs(int(x)):,}"))
             ax.set_title(f"{yr}年 {final_town} 人口金字塔", fontsize=16)
-            ax.legend(loc="upper right", frameon=False)
+            ax.legend()
             st.pyplot(fig)
 
 with tab2:
